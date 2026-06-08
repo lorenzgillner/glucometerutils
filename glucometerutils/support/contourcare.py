@@ -21,20 +21,22 @@ from typing import Optional
 from glucometerutils import driver
 from glucometerutils.support import hiddevice
 
+# TODO this
+# CR = 0x0d 0x0a (\r\n)
+# Pipe = 0x7c (124)
 _RECORD_FORMAT_RE = re.compile(
     r"\x02(?P<check>(?P<recno>[0-7])(?P<text>[^\x0d]*)\x0d(?P<end>[\x03\x17]))"  # haven't seen 0x03 yet
     r"(?P<checksum>[0-9A-F][0-9A-F])\x0d\x0a"
 )
 
 _HEADER_RECORD_RE = re.compile(
-    r"^(?P<record_type>[A-Z])\|"
-    r"(?P<escape_del>.)(?P<component_del>.)(?P<field_del>.)\|\|"
-    r"(?P<gibberish>\w{6})\|"  # what is this supposed to be?
-    r"(?P<product_code>\w+)"
-    r"\^(?P<dig_ver>\d{2}\.\d{2})"
-    r"\\(?P<anlg_ver>\d{2}\.\d{2})"
-    r"\\(?P<agp_ver>\d{2}\.\d{2})"
-    r"\^(?P<serial_num>\w+)\|"
+    r"^H\|\\\^\&\|\|"  # repeat, component, escape, field
+    r"(?P<session_id>\w{6})\|"
+    r"(?P<product_code>\w+)\^"
+    r"(?P<dig_ver>\d{2}\.\d{2})\\"
+    r"(?P<anlg_ver>\d{2}\.\d{2})\\"
+    r"(?P<agp_ver>\d{2}\.\d{2})\^"
+    r"(?P<serial_num>\w+)\|"
     r"A=(?P<res_marking>\d)\^"
     r"C=(?P<config_bits>\d+)\^"
     r"R=(?P<ref_method>\d+)\^"
@@ -46,20 +48,36 @@ _HEADER_RECORD_RE = re.compile(
     r"a=(?P<unclear>\d+)\^"
     r"J=(?P<dont_know>\d+)\|"
     r"(?P<total_recs>\d*)\|\|\|\|\|"
-    r"P\|\d+\|"
+    r"[DPT]\|(?P<proto>\d+)\|"
     r"(?P<datetime>\d+)\|$"
 )
 
+_PATIENT_RECORD_RE = re.compile(r"P\|\d+")
+
 _RESULT_RECORD_RE = re.compile(
-    r"^(?P<record_type>[a-zA-Z])\|(?P<seq_num>\d+)\|\w*\^\w*\^\w*\^"
-    r"(?P<test_id>\w+)\|(?P<value>\d+)\|(?P<unit>\w+\/\w+)\^"
-    r"(?P<ref_method>[BPD])\|\|(?P<markers>[><BADISXCZ\/1-12]*)\|\|"
-    r"(?P<datetime>\d+)"
+    r"^R\|(?P<seq_num>\d+)\|"
+    r"\^\^\^Glucose\|"
+    r"(?P<value>\d+\.\d+)\|(?P<unit>\w+)\^P\|\|"
+    r"(?P<diet>.+)\|\|"  # ???
+    r"(?P<datetime>\d+)$"
 )
 
 
 class FrameError(Exception):
     pass
+
+
+@enum.unique
+class Term(enum.IntEnum):
+    """ASTM E1394 vocabulary."""
+
+    PAD = 0x00
+    WAK = 0x58
+    ENQ = 0x05
+    ACK = 0x06
+    STX = 0x02
+    EOT = 0x04
+    NAK = 0x15
 
 
 @enum.unique
@@ -75,42 +93,42 @@ class Mode(enum.Enum):
 class ContourCareHidDevice(driver.GlucometerDevice):
     """Base class implementing the Contour Care device."""
 
-    blocksize = 64
-
+    blocksize: int = 64
     state: Optional[Mode] = None
-
     currecno: Optional[int] = None
 
-    def __init__(self, usb_ids: tuple[int, int], device_path: Optional[str]) -> None:
-        super().__init__(device_path)
-        self._hid_session = hiddevice.HidSession(usb_ids, device_path)
+    USB_VENDOR_ID: int = 0x1A79  # Bayer Health Care LLC
+    USB_PRODUCT_ID: int = 0x7950 # Contour Care
 
-    def read(self, r_size=blocksize):
-        result = []
+    def __init__(self, device_path: Optional[str]) -> None:
+        super().__init__(device_path)
+        _id = (self.USB_VENDOR_ID, self.USB_PRODUCT_ID)
+        self._hid_session = hiddevice.HidSession(_id, device_path)
+
+    def read(self, r_size=blocksize) -> bytes:
+        result = bytes()
 
         while True:
             data = self._hid_session.read()
             dstr = data
             data_end_idx = data[3] + 4
-            result.append(dstr[4:data_end_idx])
+            result += dstr[4:data_end_idx]
             if data[3] != self.blocksize - 4:
                 break
 
-        return b"".join(result)
+        return result
 
-    def write(self, data):
-        data = b"\x00\x00\x00" + chr(len(data)).encode() + data.encode()
+    def write(self, message: Term) -> None:
+        pad = bytes([Term.PAD])
+        data = 4 * pad
+        data += chr(1).encode()
+        data += bytes([message])
         pad_length = self.blocksize - len(data)
-        data += pad_length * b"\x00"
-
+        data += pad_length * pad
         self._hid_session.write(data)
 
-    def parse_header_record(self, text):
+    def parse_header_record(self, text: str) -> None:
         header = _HEADER_RECORD_RE.search(text)
-
-        self.field_del = header.group("field_del")
-        self.escape_del = header.group("escape_del")
-        self.component_del = header.group("component_del")
 
         self.product_code = header.group("product_code")
         self.dig_ver = header.group("dig_ver")
@@ -180,9 +198,11 @@ class ContourCareHidDevice(driver.GlucometerDevice):
         return match.group("text")
 
     def connect(self):
-        """Connecting the device, nothing to be done.
-        All process is hadled by hiddevice
-        """
+        """Connect to the device; handled by `hiddevice`."""
+        pass
+
+    def disconnect(self):
+        """Disconnect from the device; handled by `hiddevice`."""
         pass
 
     def _get_info_record(self):
@@ -190,16 +210,19 @@ class ContourCareHidDevice(driver.GlucometerDevice):
         self.state = Mode.ESTABLISH
         try:
             while True:
-                self.write("\x06")  # this one is different
+                # Contour Care answers to pretty much anything with a header ...
+                self.write(Term.ENQ) 
                 res = self.read()
-                if res[0] == 0x04 and res[-1] == 0x05:
-                    # we are connected and just got a header
-                    header_record = res.decode()
-                    stx = header_record.find("\x02")
+
+                if res[0] == Term.EOT and res[-1] == Term.ENQ:
+                    self.write(Term.ACK)
+                    _ = self.read()
+
+                    # We are connected and just got a header
+                    stx = res.find(Term.STX)
                     if stx != -1:
-                        result = _RECORD_FORMAT_RE.match(header_record[stx:-1]).group(
-                            "text"
-                        )
+                        header_record = res[stx:-1].decode()
+                        result = _RECORD_FORMAT_RE.match(header_record).group("text")
                         self.parse_header_record(result)
                     break
                 else:
@@ -210,12 +233,8 @@ class ContourCareHidDevice(driver.GlucometerDevice):
             raise e
 
         except Exception as e:
-            print("Uknown error occured")
+            print("Unknown error occured")
             raise e
-
-    def disconnect(self):
-        """Disconnect the device, nothing to be done."""
-        pass
 
     # Some of the commands are also shared across devices that use this HID
     # protocol, but not many. Only provide here those that do seep to change
@@ -245,19 +264,25 @@ class ContourCareHidDevice(driver.GlucometerDevice):
 
     def sync(self) -> Generator[str, None, None]:
         """
-        Sync with meter and yield received data frames
-        FSM implemented by Anders Hammarquist's for glucodump
-        More info: https://bitbucket.org/iko/glucodump/src/default/
+        Sync with meter and yield received data frames.
         """
         self.state = Mode.ESTABLISH
         try:
-            tometer = "\x04"
+            # Send "wake up call"
+            self.write(Term.WAK)
+
+            tometer = Term.ACK
             result = None
             foo = 0
+
+            # Repeat until all records have been sent
             while True:
                 self.write(tometer)
+
+                # If we are in transmission mode, yield data
                 if result is not None and self.state == Mode.DATA:
                     yield result
+
                 result = None
                 data_bytes = self.read()
                 data = data_bytes.decode()
@@ -265,32 +290,38 @@ class ContourCareHidDevice(driver.GlucometerDevice):
                 if self.state == Mode.ESTABLISH:
                     if data_bytes[-1] == 15:
                         # got a <NAK>, send <EOT>
-                        tometer = chr(foo)
+                        tometer = Term.EOT
                         foo += 1
                         foo %= 256
                         continue
-                    if data_bytes[-1] == 5:
+
+                    if data_bytes[-1] == Term.ENQ:
                         # got an <ENQ>, send <ACK>
-                        tometer = "\x06"
+                        tometer = Term.ACK
                         self.currecno = None
-                        continue
+                        # continue
+
                 if self.state == Mode.DATA:
-                    if data_bytes[-1] == 4:
+                    if data_bytes[-1] == Term.EOT:
                         # got an <EOT>, done
                         self.state = Mode.PRECOMMAND
                         break
-                stx = data.find("\x02")
+
+                # Search for start of frame
+                stx = data.find(Term.STX)
+
                 if stx != -1:
-                    # got <STX>, parse frame
+                    # Got <STX>, parse frame
                     try:
+                        dec = b"".join(data)
                         result = self.checkframe(data[stx:])
-                        tometer = "\x06"
+                        tometer = Term.ACK
                         self.state = Mode.DATA
                     except FrameError:
-                        tometer = "\x15"  # Couldn't parse, <NAK>
+                        tometer = Term.NAK  # Couldn't parse, send <NAK>
                 else:
                     # Got something we don't understand, <NAK> it
-                    tometer = "\x15"
+                    tometer = Term.NAK
         except Exception as e:
             raise e
 

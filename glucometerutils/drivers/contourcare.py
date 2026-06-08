@@ -30,10 +30,10 @@ def _extract_timestamp(parsed_record: dict[str, str]):
     datetime_str = parsed_record["datetime"]
 
     return datetime.datetime(
-        int(datetime_str[0:4]),  # year
-        int(datetime_str[4:6]),  # month
-        int(datetime_str[6:8]),  # day
-        int(datetime_str[8:10]),  # hour
+        int(datetime_str[0:4]),    # year
+        int(datetime_str[4:6]),    # month
+        int(datetime_str[6:8]),    # day
+        int(datetime_str[8:10]),   # hour
         int(datetime_str[10:12]),  # minute
         int(datetime_str[12:14]),  # second
         0,
@@ -42,27 +42,18 @@ def _extract_timestamp(parsed_record: dict[str, str]):
 
 class Device(contourcare.ContourCareHidDevice):
     """Glucometer driver for Contour Care devices."""
-
-    USB_VENDOR_ID: int = 0x1A79  # Bayer Health Care LLC Contour
-    USB_PRODUCT_ID: int = 0x7950
-
+    
     def __init__(self, device: Optional[str]) -> None:
-        super().__init__((self.USB_VENDOR_ID, self.USB_PRODUCT_ID), device)
+        super().__init__(device)
 
     def get_meter_info(self) -> common.MeterInfo:
         self._get_info_record()
         return common.MeterInfo(
             "Contour Care",
             serial_number=self.get_serial_number(),
-            version_info=("Meter versions: " + self._get_version(),),
+            version_info=("Meter versions: " + self.get_version(),),
             native_unit=self.get_glucose_unit(),
         )
-
-    def get_glucose_unit(self) -> common.Unit:
-        if self._get_glucose_unit() == "0":
-            return common.Unit.MG_DL
-        else:
-            return common.Unit.MMOL_L
 
     def get_readings(self) -> Generator[common.AnyReading, None, None]:
         """
@@ -78,7 +69,16 @@ class Device(contourcare.ContourCareHidDevice):
             )
 
     def get_serial_number(self) -> str:
-        return self._get_serial_number
+        return self._get_serial_number()
+    
+    def get_version(self):
+        return self._get_version()
+
+    def get_glucose_unit(self) -> common.Unit:
+        if self._get_glucose_unit() == "0":
+            return common.Unit.MG_DL
+        else:
+            return common.Unit.MMOL_L
 
     def _set_device_datetime(self, date: datetime.datetime) -> NoReturn:
         raise NotImplementedError
