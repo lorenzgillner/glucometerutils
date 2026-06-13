@@ -28,6 +28,11 @@ _MEAL_CODES = {
     "F": common.Meal.FASTING,
 }
 
+_UNIT_CODES = {
+    "mg/dL": common.Unit.MG_DL,
+    "mmol/L": common.Unit.MMOL_L,
+}
+
 
 class Device(contourcare.ContourCareHidDevice):
     """Glucometer driver for Contour Care devices."""
@@ -51,18 +56,13 @@ class Device(contourcare.ContourCareHidDevice):
         """
         for parsed_record in self._get_multirecord():
             timestamp = self.parse_timestamp(parsed_record["datetime"])
-            # Apparently the GlucoseReadings expect mg/dL values, so convert if necessary
-            value = common.convert_glucose_unit(
-                float(parsed_record["value"]),
-                self.get_glucose_unit(),
-                common.Unit.MG_DL,
-            )
-            meal = _MEAL_CODES[parsed_record["meal"][0]]
+            value = float(parsed_record["value"])
             yield common.GlucoseReading(
                 timestamp,
                 value,
-                meal,
+                _MEAL_CODES[parsed_record["meal"][0]],
                 measure_method=common.MeasurementMethod.BLOOD_SAMPLE,
+                unit=_UNIT_CODES[parsed_record["unit"]],
             )
 
     def get_serial_number(self) -> str:
