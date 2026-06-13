@@ -51,7 +51,12 @@ class Device(contourcare.ContourCareHidDevice):
         """
         for parsed_record in self._get_multirecord():
             timestamp = self.parse_timestamp(parsed_record["datetime"])
-            value = float(parsed_record["value"])
+            # Apparently the GlucoseReadings expect mg/dL values, so convert if necessary
+            value = common.convert_glucose_unit(
+                float(parsed_record["value"]),
+                self.get_glucose_unit(),
+                common.Unit.MG_DL,
+            )
             meal = _MEAL_CODES[parsed_record["meal"][0]]
             yield common.GlucoseReading(
                 timestamp,

@@ -275,13 +275,13 @@ class ContourCareHidDevice(driver.GlucometerDevice):
     def sync(self) -> Generator[str, None, None]:
         """Sync with meter and yield received data frames."""
         self.state = Mode.ESTABLISH
+
         try:
             # Send "wake up call"
             self.write(Term.WAK)
 
             tometer = Term.ACK
             result = None
-            foo = 0
 
             # Repeat until all records have been sent
             while True:
@@ -299,8 +299,6 @@ class ContourCareHidDevice(driver.GlucometerDevice):
                         case Term.NAK:
                             # Got a <NAK>, send <EOT>
                             tometer = Term.EOT
-                            foo += 1
-                            foo %= 256
                             continue
 
                         case Term.ENQ:
