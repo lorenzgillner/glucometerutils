@@ -27,7 +27,7 @@ _RECORD_FORMAT_RE = re.compile(
 )
 
 _HEADER_RECORD_RE = re.compile(
-    r"^H\|\\\^\&\|\|"  # repeat, component, escape, field
+    r"H\|\\\^\&\|\|"  # repeat, component, escape, field
     r"(?P<session_id>\w{6})\|"
     r"(?P<product_code>\w+)\^"
     r"(?P<dig_ver>\d{2}\.\d{2})\\"
@@ -46,19 +46,21 @@ _HEADER_RECORD_RE = re.compile(
     r"J=(?P<dont_know>\d+)\|"
     r"(?P<total_recs>\d*)\|\|\|\|\|"
     r"[DPT]\|(?P<proto>\d+)\|"
-    r"(?P<datetime>\d+)\|$"
+    r"(?P<datetime>\d+)\|"
 )
 
-_PATIENT_RECORD_RE = re.compile(r"P\|\d+")
-
 _RESULT_RECORD_RE = re.compile(
-    r"^R\|(?P<seq_num>\d+)\|"
+    r"R\|(?P<seq_num>\d+)\|"
     r"\^\^\^Glucose\|"
     r"(?P<value>\d+\.\d+)\|"
     r"(?P<unit>\w+\/\w+)\^(?P<ref_method>[BPD])\|\|"
     r"(?P<meal>(\w+\/)?\w+)\|\|"
-    r"(?P<datetime>\d+)$"
+    r"(?P<datetime>\d+)"
 )
+
+_PATIENT_RECORD_RE = re.compile(r"P\|\d+")
+
+_TERMINATOR_RECORD_RE = re.compile(r"L\|1\|\|[NTERQIF]?")
 
 
 class FrameError(Exception):
@@ -76,6 +78,8 @@ class Term(enum.IntEnum):
     STX = 0x02
     EOT = 0x04
     NAK = 0x15
+    ETB = 0x17
+    ETX = 0x03
 
 
 @enum.unique
@@ -305,14 +309,12 @@ class ContourCareHidDevice(driver.GlucometerDevice):
                             # Got an <ENQ>, send <ACK>
                             tometer = Term.ACK
                             self.currecno = None
-                            # continue
+                            continue
 
                 if self.state == Mode.DATA:
-                    if data[-1] == Term.EOT:
-                        # Got an <EOT>, done
+                    if data[-5] == Term.ETX:
                         self.state = Mode.PRECOMMAND
                         tometer = Term.EOT
-                        self.read()
                         break
 
                 # Search for start of frame
@@ -341,7 +343,6 @@ class ContourCareHidDevice(driver.GlucometerDevice):
           A list of dictionaries, each representing a record from the record file.
         """
         records = []
-        finished = False
 
         for rec in self.sync():
             match rec[0]:
