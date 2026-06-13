@@ -21,28 +21,17 @@ from typing import NoReturn, Optional
 from glucometerutils import common
 from glucometerutils.support import contourcare
 
-
-def _extract_timestamp(parsed_record: dict[str, str]):
-    """Extract the timestamp from a parsed record.
-
-    This leverages the fact that all the reading records have the same base structure.
-    """
-    datetime_str = parsed_record["datetime"]
-
-    return datetime.datetime(
-        int(datetime_str[0:4]),    # year
-        int(datetime_str[4:6]),    # month
-        int(datetime_str[6:8]),    # day
-        int(datetime_str[8:10]),   # hour
-        int(datetime_str[10:12]),  # minute
-        int(datetime_str[12:14]),  # second
-        0,
-    )
+_MEAL_CODES = {
+    "T": common.Meal.NONE,
+    "B": common.Meal.BEFORE,
+    "A": common.Meal.AFTER,
+    "F": common.Meal.FASTING,
+}
 
 
 class Device(contourcare.ContourCareHidDevice):
     """Glucometer driver for Contour Care devices."""
-    
+
     def __init__(self, device: Optional[str]) -> None:
         super().__init__(device)
 
@@ -61,16 +50,19 @@ class Device(contourcare.ContourCareHidDevice):
         This meter supports only blood samples
         """
         for parsed_record in self._get_multirecord():
+            timestamp = self.parse_timestamp(parsed_record["datetime"])
+            value = float(parsed_record["value"])
+            meal = _MEAL_CODES[parsed_record["meal"][0]]
             yield common.GlucoseReading(
-                _extract_timestamp(parsed_record),
-                int(parsed_record["value"]),
-                comment=parsed_record["markers"],
+                timestamp,
+                value,
+                meal,
                 measure_method=common.MeasurementMethod.BLOOD_SAMPLE,
             )
 
     def get_serial_number(self) -> str:
         return self._get_serial_number()
-    
+
     def get_version(self):
         return self._get_version()
 

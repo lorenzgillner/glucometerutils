@@ -21,8 +21,9 @@ class Unit(enum.Enum):
 # Constants for meal information
 class Meal(enum.Enum):
     NONE = ""
-    BEFORE = "Before Meal"
-    AFTER = "After Meal"
+    BEFORE = "before meal"
+    AFTER = "after meal"
+    FASTING = "fasting"
 
 
 # Constants for measure method

@@ -21,11 +21,8 @@ from typing import Optional
 from glucometerutils import driver
 from glucometerutils.support import hiddevice
 
-# TODO this
-# CR = 0x0d 0x0a (\r\n)
-# Pipe = 0x7c (124)
 _RECORD_FORMAT_RE = re.compile(
-    r"\x02(?P<check>(?P<recno>[0-7])(?P<text>[^\x0d]*)\x0d(?P<end>[\x03\x17]))"  # haven't seen 0x03 yet
+    r"\x02(?P<check>(?P<recno>[0-7])(?P<text>[^\x0d]*)\x0d(?P<end>[\x17\x03]))"
     r"(?P<checksum>[0-9A-F][0-9A-F])\x0d\x0a"
 )
 
@@ -57,8 +54,9 @@ _PATIENT_RECORD_RE = re.compile(r"P\|\d+")
 _RESULT_RECORD_RE = re.compile(
     r"^R\|(?P<seq_num>\d+)\|"
     r"\^\^\^Glucose\|"
-    r"(?P<value>\d+\.\d+)\|(?P<unit>\w+)\^P\|\|"
-    r"(?P<diet>.+)\|\|"  # ???
+    r"(?P<value>\d+\.\d+)\|"
+    r"(?P<unit>\w+\/\w+)\^(?P<ref_method>[BPD])\|\|"
+    r"(?P<meal>(\w+\/)?\w+)\|\|"
     r"(?P<datetime>\d+)$"
 )
 
@@ -69,7 +67,7 @@ class FrameError(Exception):
 
 @enum.unique
 class Term(enum.IntEnum):
-    """ASTM E1394 vocabulary."""
+    """ASTM E1394-97 vocabulary."""
 
     PAD = 0x00
     WAK = 0x58
@@ -93,26 +91,37 @@ class Mode(enum.Enum):
 class ContourCareHidDevice(driver.GlucometerDevice):
     """Base class implementing the Contour Care device."""
 
+    USB_VENDOR_ID: int = 0x1A79  # Bayer Health Care LLC
+    USB_PRODUCT_ID: int = 0x7950  # Contour Care
+
     blocksize: int = 64
     state: Optional[Mode] = None
     currecno: Optional[int] = None
 
-    USB_VENDOR_ID: int = 0x1A79  # Bayer Health Care LLC
-    USB_PRODUCT_ID: int = 0x7950 # Contour Care
-
     def __init__(self, device_path: Optional[str]) -> None:
         super().__init__(device_path)
-        _id = (self.USB_VENDOR_ID, self.USB_PRODUCT_ID)
-        self._hid_session = hiddevice.HidSession(_id, device_path)
+        hidid = (self.USB_VENDOR_ID, self.USB_PRODUCT_ID)
+        timeout = 200
+        self._hid_session = hiddevice.HidSession(hidid, device_path, timeout)
+
+    def connect(self):
+        """Connect to the device; handled by `hiddevice`."""
+        pass
+
+    def disconnect(self):
+        """Disconnect from the device; handled by `hiddevice`."""
+        pass
 
     def read(self, r_size=blocksize) -> bytes:
+        """Read data via `hiddevice`."""
         result = bytes()
 
         while True:
             data = self._hid_session.read()
-            dstr = data
             data_end_idx = data[3] + 4
-            result += dstr[4:data_end_idx]
+            result += data[4:data_end_idx]
+
+            # Data is smaller than block size; must be the last block
             if data[3] != self.blocksize - 4:
                 break
 
@@ -127,8 +136,51 @@ class ContourCareHidDevice(driver.GlucometerDevice):
         data += pad_length * pad
         self._hid_session.write(data)
 
+    def checksum(self, text):
+        """
+        Implemented by Anders Hammarquist for glucodump project
+        More info: https://bitbucket.org/iko/glucodump/src/default/
+        """
+        checksum = hex(sum(ord(c) for c in text) % 256).upper().split("X")[1]
+        return ("00" + checksum)[-2:]
+
+    def checkframe(self, frame: str) -> Optional[str]:
+        """
+        Implemented by Anders Hammarquist for glucodump project
+        More info: https://bitbucket.org/iko/glucodump/src/default/
+        """
+        match = _RECORD_FORMAT_RE.match(frame)
+
+        if match is None:
+            raise FrameError("Couldn't parse frame", frame)
+
+        recno = int(match.group("recno"))
+        if self.currecno is None:
+            self.currecno = recno
+
+        if recno + 1 == self.currecno:
+            return None
+
+        if recno != self.currecno:
+            raise FrameError(
+                f"Bad recno, got {recno!r} expected {self.currecno!r}", frame
+            )
+
+        calculated_checksum = self.checksum(match.group("check"))
+        received_checksum = match.group("checksum")
+        if calculated_checksum != received_checksum:
+            raise FrameError(
+                f"Checksum error: received {received_checksum} expected {calculated_checksum}",
+                frame,
+            )
+
+        self.currecno = (self.currecno + 1) % 8
+        return match.group("text")
+
     def parse_header_record(self, text: str) -> None:
+        """Parse a header record and set device properties."""
         header = _HEADER_RECORD_RE.search(text)
+        assert header is not None
 
         self.product_code = header.group("product_code")
         self.dig_ver = header.group("dig_ver")
@@ -157,73 +209,42 @@ class ContourCareHidDevice(driver.GlucometerDevice):
         # Datetime string in YYYYMMDDHHMMSS format
         self.datetime = header.group("datetime")
 
-    def checksum(self, text):
-        """
-        Implemented by Anders Hammarquist for glucodump project
-        More info: https://bitbucket.org/iko/glucodump/src/default/
-        """
-        checksum = hex(sum(ord(c) for c in text) % 256).upper().split("X")[1]
-        return ("00" + checksum)[-2:]
+    def parse_result_record(self, text: str) -> dict[str, str]:
+        """Parse a result record and return it as a dictionary."""
+        result = _RESULT_RECORD_RE.search(text)
+        assert result is not None
+        return result.groupdict()
 
-    def checkframe(self, frame) -> Optional[str]:
-        """
-        Implemented by Anders Hammarquist for glucodump project
-        More info: https://bitbucket.org/iko/glucodump/src/default/
-        """
-        match = _RECORD_FORMAT_RE.match(frame)
-        if not match:
-            raise FrameError("Couldn't parse frame", frame)
+    def parse_timestamp(self, datetime_str: str) -> datetime.datetime:
+        """Extract the timestamp from a parsed record."""
+        return datetime.datetime(
+            int(datetime_str[0:4]),  # year
+            int(datetime_str[4:6]),  # month
+            int(datetime_str[6:8]),  # day
+            int(datetime_str[8:10]),  # hour
+            int(datetime_str[10:12]),  # minute
+            int(datetime_str[12:14]),  # second
+            0,
+        )
 
-        recno = int(match.group("recno"))
-        if self.currecno is None:
-            self.currecno = recno
-
-        if recno + 1 == self.currecno:
-            return None
-
-        if recno != self.currecno:
-            raise FrameError(
-                f"Bad recno, got {recno!r} expected {self.currecno!r}", frame
-            )
-
-        calculated_checksum = self.checksum(match.group("check"))
-        received_checksum = match.group("checksum")
-        if calculated_checksum != received_checksum:
-            raise FrameError(
-                f"Checksum error: received {received_checksum} expected {calculated_checksum}",
-                frame,
-            )
-
-        self.currecno = (self.currecno + 1) % 8
-        return match.group("text")
-
-    def connect(self):
-        """Connect to the device; handled by `hiddevice`."""
-        pass
-
-    def disconnect(self):
-        """Disconnect from the device; handled by `hiddevice`."""
-        pass
-
-    def _get_info_record(self):
+    def _get_info_record(self) -> None:
         self.currecno = None
         self.state = Mode.ESTABLISH
+
         try:
             while True:
-                # Contour Care answers to pretty much anything with a header ...
-                self.write(Term.ENQ) 
+                # Send EOT to suppress further output; device will answer with a header anyway
+                self.write(Term.EOT)
                 res = self.read()
 
                 if res[0] == Term.EOT and res[-1] == Term.ENQ:
-                    self.write(Term.ACK)
-                    _ = self.read()
-
                     # We are connected and just got a header
                     stx = res.find(Term.STX)
                     if stx != -1:
                         header_record = res[stx:-1].decode()
                         result = _RECORD_FORMAT_RE.match(header_record).group("text")
                         self.parse_header_record(result)
+
                     break
                 else:
                     pass
@@ -236,9 +257,6 @@ class ContourCareHidDevice(driver.GlucometerDevice):
             print("Unknown error occured")
             raise e
 
-    # Some of the commands are also shared across devices that use this HID
-    # protocol, but not many. Only provide here those that do seep to change
-    # between them.
     def _get_version(self) -> str:
         """Return the software version of the device."""
         return self.dig_ver + " - " + self.anlg_ver + " - " + self.agp_ver
@@ -252,20 +270,10 @@ class ContourCareHidDevice(driver.GlucometerDevice):
         return self.unit
 
     def get_datetime(self) -> datetime.datetime:
-        datetime_str = self.datetime
-        return datetime.datetime(
-            int(datetime_str[0:4]),  # year
-            int(datetime_str[4:6]),  # month
-            int(datetime_str[6:8]),  # day
-            int(datetime_str[8:10]),  # hour
-            int(datetime_str[10:12]),  # minute
-            0,
-        )
+        return self.parse_timestamp(self.datetime)
 
     def sync(self) -> Generator[str, None, None]:
-        """
-        Sync with meter and yield received data frames.
-        """
+        """Sync with meter and yield received data frames."""
         self.state = Mode.ESTABLISH
         try:
             # Send "wake up call"
@@ -284,27 +292,29 @@ class ContourCareHidDevice(driver.GlucometerDevice):
                     yield result
 
                 result = None
-                data_bytes = self.read()
-                data = data_bytes.decode()
+                data = self.read()
 
                 if self.state == Mode.ESTABLISH:
-                    if data_bytes[-1] == 15:
-                        # got a <NAK>, send <EOT>
-                        tometer = Term.EOT
-                        foo += 1
-                        foo %= 256
-                        continue
+                    match data[-1]:
+                        case Term.NAK:
+                            # Got a <NAK>, send <EOT>
+                            tometer = Term.EOT
+                            foo += 1
+                            foo %= 256
+                            continue
 
-                    if data_bytes[-1] == Term.ENQ:
-                        # got an <ENQ>, send <ACK>
-                        tometer = Term.ACK
-                        self.currecno = None
-                        # continue
+                        case Term.ENQ:
+                            # Got an <ENQ>, send <ACK>
+                            tometer = Term.ACK
+                            self.currecno = None
+                            # continue
 
                 if self.state == Mode.DATA:
-                    if data_bytes[-1] == Term.EOT:
-                        # got an <EOT>, done
+                    if data[-1] == Term.EOT:
+                        # Got an <EOT>, done
                         self.state = Mode.PRECOMMAND
+                        tometer = Term.EOT
+                        self.read()
                         break
 
                 # Search for start of frame
@@ -313,8 +323,8 @@ class ContourCareHidDevice(driver.GlucometerDevice):
                 if stx != -1:
                     # Got <STX>, parse frame
                     try:
-                        dec = b"".join(data)
-                        result = self.checkframe(data[stx:])
+                        frame = bytes.decode(data[stx:])
+                        result = self.checkframe(frame)
                         tometer = Term.ACK
                         self.state = Mode.DATA
                     except FrameError:
@@ -322,29 +332,28 @@ class ContourCareHidDevice(driver.GlucometerDevice):
                 else:
                     # Got something we don't understand, <NAK> it
                     tometer = Term.NAK
+
         except Exception as e:
             raise e
-
-    def parse_result_record(self, text: str) -> dict[str, str]:
-        result = _RESULT_RECORD_RE.search(text)
-        assert result is not None
-        rec_text = result.groupdict()
-        return rec_text
 
     def _get_multirecord(self) -> list[dict[str, str]]:
         """Queries for, and returns, "multirecords" results.
 
         Returns:
-          (csv.reader): a CSV reader object that returns a record for each line
-             in the record file.
+          A list of dictionaries, each representing a record from the record file.
         """
-        records_arr = []
-        for rec in self.sync():
-            if rec[0] == "R":
-                # parse using result record regular expression
-                rec_text = self.parse_result_record(rec)
-                # get dictionary to use in main driver module without import re
+        records = []
+        finished = False
 
-                records_arr.append(rec_text)
-        # return csv.reader(records_arr)
-        return records_arr  # array of groupdicts
+        for rec in self.sync():
+            match rec[0]:
+                case "R":
+                    record = self.parse_result_record(rec)
+                    records.append(record)
+                case "L":
+                    # TODO handle L records properly
+                    break
+                case _:
+                    continue
+
+        return records  # array of groupdicts
