@@ -50,7 +50,7 @@ _HEADER_RECORD_RE = re.compile(
 )
 
 _RESULT_RECORD_RE = re.compile(
-    r"R\|(?P<seq_num>\d+)\|"
+    r"R\|(?P<seqnum>\d+)\|"
     r"\^\^\^Glucose\|"
     r"(?P<value>\d+\.\d+)\|"
     r"(?P<unit>\w+\/\w+)\^(?P<ref_method>[BPD])\|\|"
@@ -58,9 +58,12 @@ _RESULT_RECORD_RE = re.compile(
     r"(?P<datetime>\d+)"
 )
 
-_PATIENT_RECORD_RE = re.compile(r"P\|\d+")
+_PATIENT_RECORD_RE = re.compile(r"P\|(?P<seqnum>\d+)\|")
 
-_TERMINATOR_RECORD_RE = re.compile(r"L\|1\|\|[NTERQIF]?")
+_TERMINATOR_RECORD_RE = re.compile(r"L\|1\|\|(?P<code>[NTERQIF]?)")
+
+VENDOR_ID: int = 0x1A79  # Bayer Health Care LLC
+TIMEOUT_MS: int = 200
 
 
 class FrameError(Exception):
@@ -68,18 +71,31 @@ class FrameError(Exception):
 
 
 @enum.unique
-class Term(enum.IntEnum):
-    """ASTM E1394-97 vocabulary."""
+class Control(enum.IntEnum):
+    """ASCII Control characters."""
 
     PAD = 0x00
-    WAK = 0x58
+    STX = 0x02
+    ETX = 0x03
+    EOT = 0x04
     ENQ = 0x05
     ACK = 0x06
-    STX = 0x02
-    EOT = 0x04
     NAK = 0x15
     ETB = 0x17
-    ETX = 0x03
+    WAK = 0x58
+
+
+@enum.unique
+class TerminatorCode(enum.Enum):
+    """Terminator record return codes."""
+
+    NORMAL = "N"
+    SENDER_ABORT = "T"
+    RECEIVER_ABORT = "R"
+    UNKNOWN = "E"
+    REQUEST_ERROR = "Q"
+    NO_INFORMATION = "I"
+    LAST_REQUEST = "F"
 
 
 @enum.unique
@@ -95,18 +111,14 @@ class Mode(enum.Enum):
 class ContourCareHidDevice(driver.GlucometerDevice):
     """Base class implementing the Contour Care device."""
 
-    USB_VENDOR_ID: int = 0x1A79  # Bayer Health Care LLC
-    USB_PRODUCT_ID: int = 0x7950  # Contour Care
-
     blocksize: int = 64
     state: Optional[Mode] = None
     currecno: Optional[int] = None
 
-    def __init__(self, device_path: Optional[str]) -> None:
+    def __init__(self, product_id: int, device_path: Optional[str]) -> None:
         super().__init__(device_path)
-        hidid = (self.USB_VENDOR_ID, self.USB_PRODUCT_ID)
-        timeout = 200
-        self._hid_session = hiddevice.HidSession(hidid, device_path, timeout)
+        hidid = (VENDOR_ID, product_id)
+        self._hid_session = hiddevice.HidSession(hidid, device_path, TIMEOUT_MS)
 
     def connect(self):
         """Connect to the device; handled by `hiddevice`."""
@@ -131,8 +143,8 @@ class ContourCareHidDevice(driver.GlucometerDevice):
 
         return result
 
-    def write(self, message: Term) -> None:
-        pad = bytes([Term.PAD])
+    def write(self, message: Control) -> None:
+        pad = bytes([Control.PAD])
         data = 4 * pad
         data += chr(1).encode()
         data += bytes([message])
@@ -219,6 +231,12 @@ class ContourCareHidDevice(driver.GlucometerDevice):
         assert result is not None
         return result.groupdict()
 
+    def parse_terminator_record(self, text: str) -> TerminatorCode:
+        """Parse a terminator record and return it as a dictionary."""
+        result = _TERMINATOR_RECORD_RE.search(text)
+        assert result is not None
+        return TerminatorCode(result.group("code"))
+
     def parse_timestamp(self, datetime_str: str) -> datetime.datetime:
         """Extract the timestamp from a parsed record."""
         return datetime.datetime(
@@ -238,16 +256,17 @@ class ContourCareHidDevice(driver.GlucometerDevice):
         try:
             while True:
                 # Send EOT to suppress further output; device will answer with a header anyway
-                self.write(Term.EOT)
+                self.write(Control.EOT)
                 res = self.read()
 
-                if res[0] == Term.EOT and res[-1] == Term.ENQ:
+                if res[0] == Control.EOT and res[-1] == Control.ENQ:
                     # We are connected and just got a header
-                    stx = res.find(Term.STX)
+                    stx = res.find(Control.STX)
                     if stx != -1:
                         header_record = res[stx:-1].decode()
-                        result = _RECORD_FORMAT_RE.match(header_record).group("text")
-                        self.parse_header_record(result)
+                        result = _RECORD_FORMAT_RE.match(header_record)
+                        assert result is not None
+                        self.parse_header_record(result.group("text"))
 
                     break
                 else:
@@ -282,9 +301,9 @@ class ContourCareHidDevice(driver.GlucometerDevice):
 
         try:
             # Send "wake up call"
-            self.write(Term.WAK)
+            self.write(Control.WAK)
 
-            tometer = Term.ACK
+            tometer = Control.ACK
             result = None
 
             # Repeat until all records have been sent
@@ -300,38 +319,38 @@ class ContourCareHidDevice(driver.GlucometerDevice):
 
                 if self.state == Mode.ESTABLISH:
                     match data[-1]:
-                        case Term.NAK:
+                        case Control.NAK:
                             # Got a <NAK>, send <EOT>
-                            tometer = Term.EOT
+                            tometer = Control.EOT
                             continue
 
-                        case Term.ENQ:
+                        case Control.ENQ:
                             # Got an <ENQ>, send <ACK>
-                            tometer = Term.ACK
+                            tometer = Control.ACK
                             self.currecno = None
                             continue
 
                 if self.state == Mode.DATA:
-                    if data[-5] == Term.ETX:
+                    if data[-5] == Control.ETX:
                         self.state = Mode.PRECOMMAND
-                        tometer = Term.EOT
+                        tometer = Control.EOT
                         break
 
                 # Search for start of frame
-                stx = data.find(Term.STX)
+                stx = data.find(Control.STX)
 
                 if stx != -1:
                     # Got <STX>, parse frame
                     try:
                         frame = bytes.decode(data[stx:])
                         result = self.checkframe(frame)
-                        tometer = Term.ACK
+                        tometer = Control.ACK
                         self.state = Mode.DATA
                     except FrameError:
-                        tometer = Term.NAK  # Couldn't parse, send <NAK>
+                        tometer = Control.NAK  # Couldn't parse, send <NAK>
                 else:
                     # Got something we don't understand, <NAK> it
-                    tometer = Term.NAK
+                    tometer = Control.NAK
 
         except Exception as e:
             raise e
@@ -350,7 +369,9 @@ class ContourCareHidDevice(driver.GlucometerDevice):
                     record = self.parse_result_record(rec)
                     records.append(record)
                 case "L":
-                    # TODO handle L records properly
+                    code = self.parse_terminator_record(rec)
+                    if code != TerminatorCode.NORMAL:
+                        raise ValueError(f"Unexpected terminator code: {code}")
                     break
                 case _:
                     continue

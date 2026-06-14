@@ -33,12 +33,14 @@ _UNIT_CODES = {
     "mmol/L": common.Unit.MMOL_L,
 }
 
+PRODUCT_ID: int = 0x7950  # Contour Care
+
 
 class Device(contourcare.ContourCareHidDevice):
     """Glucometer driver for Contour Care devices."""
 
     def __init__(self, device: Optional[str]) -> None:
-        super().__init__(device)
+        super().__init__(PRODUCT_ID, device)
 
     def get_meter_info(self) -> common.MeterInfo:
         self._get_info_record()
@@ -81,4 +83,10 @@ class Device(contourcare.ContourCareHidDevice):
         raise NotImplementedError
 
     def zero_log(self) -> NoReturn:
+        raise NotImplementedError
+
+    def get_patient_name(self) -> str:
+        raise NotImplementedError
+
+    def set_patient_name(self, name: str) -> None:
         raise NotImplementedError

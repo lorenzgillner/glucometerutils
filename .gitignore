@@ -16,3 +16,4 @@ build
 .idea/
 *venv/
 *.swp
+.DS_Store
